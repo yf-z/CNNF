@@ -125,8 +125,10 @@ class CNNF(nn.Module):
         self.relu5.reset()
         self.relu6.reset()
 
-    def run_cycles(self, data):
+    def run_cycles(self, data):  # without gradient track
         # evaluate with all the iterations
+        # in each iteration: reconstruct input and recompute input to next forward
+        # for each iteration: input moves forward 1 layer
         with torch.no_grad():
             data = data.cuda()
             self.reset()
@@ -140,7 +142,7 @@ class CNNF(nn.Module):
 
         return output
         
-    def run_cycles_adv(self, data):
+    def run_cycles_adv(self, data):  # with gradient track
         data = data.cuda()
         self.reset()
         output, orig_feature, _, _ = self.forward(data, first=True, inter=True)
@@ -153,7 +155,7 @@ class CNNF(nn.Module):
         return output
 
     def run_average(self, data):
-        # return averaged logits
+        # return averaged logits  (average for different iterations)
         data = data.cuda()
         self.reset()
         output_list = []
