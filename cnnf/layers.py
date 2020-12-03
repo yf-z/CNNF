@@ -140,7 +140,46 @@ class ReLU(nn.Module):
     def reset(self):
         self.hidden = None
         self.state = None
-        
+
+
+class LeakyReLU(nn.Module):
+    """
+    LeakyReLU
+    """
+
+    def __init__(self, negative_slope=0.01):
+        super().__init__()
+        self.mask = None
+        self.hidden = None
+        self.negative_slope = negative_slope
+
+    def forward(self, x, unit_space=None, step='forward'):
+        if 'forward' in step:
+            # Store which weights were activated
+            if self.hidden is None:
+                self.mask = (x > 0).float() + (x < 0).float() * self.negative_slope
+            else:
+                self.mask = (x * self.hidden > 0).float() + (x * self.hidden() < 0).float() * self.negative_slope
+            result = x * self.mask
+
+            return result
+
+        elif 'backward' in step:
+            self.hidden = x
+            recon_hidden = x / self.mask
+            if unit_space is not None:
+                return recon_hidden, unit_space
+            else:
+                return recon_hidden
+
+        else:
+            raise ValueError("step must be 'forward' or 'backward'")
+
+    def reset(self):
+        self.hidden = None
+        self.mask = None
+
+
 class resReLU(nn.Module):
     """
     AdaReLU with residual updates.
@@ -306,3 +345,8 @@ class Dropout(nn.Module):
 
         else:
             raise ValueError("step must be 'forward' or 'backward'")
+
+
+# yolo
+# route
+# upsample
