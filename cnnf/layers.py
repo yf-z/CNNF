@@ -218,6 +218,7 @@ class resReLU(nn.Module):
         self.hidden = None
         self.state = None
 
+
 class AvgPool2d(nn.Module):
     
     def __init__(self, kernel_size, scale_factor=10, **kwargs):
@@ -232,6 +233,26 @@ class AvgPool2d(nn.Module):
 
         elif 'backward' in step:
             return self.upsample(x)
+
+        else:
+            raise ValueError("step must be 'forward' or 'backward'")
+
+
+class UpSampling(nn.Module):
+
+    def __init__(self, kernel_size=2, scale_factor=2, **kwargs):
+        super().__init__()
+
+        self.avgpool = nn.AvgPool2d(kernel_size, **kwargs)
+        self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor,
+                                               **kwargs)
+
+    def forward(self, x, step='forward'):
+        if 'forward' in step:
+            return self.upsample(x)
+
+        elif 'backward' in step:
+            return self.avgpool(x)
 
         else:
             raise ValueError("step must be 'forward' or 'backward'")
@@ -345,8 +366,3 @@ class Dropout(nn.Module):
 
         else:
             raise ValueError("step must be 'forward' or 'backward'")
-
-
-# yolo
-# route
-# upsample
