@@ -43,17 +43,17 @@ class Conv2d(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
                               bias=bias, **kwargs)
-        
-        if self.conv.stride[0] > 1:        
+
+        if self.conv.stride[0] > 1:
             self.conv_t = nn.ConvTranspose2d(out_channels, in_channels,
                                          kernel_size, bias=bias, output_padding=1, **kwargs)
         else:
             self.conv_t = nn.ConvTranspose2d(out_channels, in_channels,
                                          kernel_size, bias=bias, **kwargs)
-            
+
         n = self.conv.kernel_size[0] * self.conv.kernel_size[1] * self.conv.out_channels
         self.conv.weight.data.normal_(0, math.sqrt(2. / n))  # He initialization
-        
+
         # Tie the weights between the convolution and the transposed convolution
         self.conv_t.weight = self.conv.weight
 
@@ -242,10 +242,8 @@ class UpSampling(nn.Module):
 
     def __init__(self, kernel_size=2, scale_factor=2, **kwargs):
         super().__init__()
-
         self.avgpool = nn.AvgPool2d(kernel_size, **kwargs)
-        self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor,
-                                               **kwargs)
+        self.upsample = nn.UpsamplingNearest2d(scale_factor=scale_factor, **kwargs)
 
     def forward(self, x, step='forward'):
         if 'forward' in step:
@@ -364,5 +362,73 @@ class Dropout(nn.Module):
             else:
                 return x
 
+        else:
+            raise ValueError("step must be 'forward' or 'backward'")
+
+
+class ConvCom(nn.Module):
+    """
+    a compound conv layer including: conv + bn + activation
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, bias=True, bn=True, act=True, **kwargs):
+        super().__init__()
+        self.conv = Conv2d(in_channels, out_channels, kernel_size, bias=False, **kwargs)
+        if bias:
+            self.bias = Bias((in_channels, out_channels, kernel_size ** 2))
+        else:
+            self.bias = None
+        if bn:
+            self.bn = InsNorm()
+        else:
+            self.bn = None
+        if act:
+            self.act = LeakyReLU()
+        else:
+            self.act = None
+
+
+    def forward(self, x, step='forward'):
+        if 'forward' in step:
+            x = self.conv(x)
+            if self.bias is not None:
+                x = self.bias(x)
+            if self.bn is not None:
+                x = self.bn(x)
+            if self.act is not None:
+                x = self.act(x)
+            return x
+
+        elif 'backward' in step:
+            if self.act is not None:
+                x = self.act(x, step='backward')
+            if self.bn is not None:
+                x = self.bn(x)
+            if self.bias is not None:
+                x = self.bias(x, step='backward')
+            x = self.conv(x, step='backward')
+            return x
+
+        else:
+            raise ValueError("step must be 'forward' or 'backward'")
+
+    def reset(self):
+        if self.act is not None:
+            self.act.reset()
+
+
+class Concat(nn.Module):
+    def __init__(self, size):
+        self.cat = torch.empty(*size)
+
+    def forward(self, x, step='forward', bias=None):
+        if bias is not None:
+            self.cat = bias
+        if 'forward' in step:
+            return torch.cat((x,self.cat), dim=1)
+        elif 'backward' in step:
+            chunks = torch.split(x, chunks=2, dim=1)
+            self.cat = chunks[1]
+            return chunks[0]
         else:
             raise ValueError("step must be 'forward' or 'backward'")
