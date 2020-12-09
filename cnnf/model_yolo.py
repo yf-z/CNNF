@@ -33,9 +33,8 @@ class YoloPart(nn.Module):
         self.conv3 = layers.ConvCom(1024, 512, kernel_size=1, stride=1, padding=0)
         self.conv4 = layers.ConvCom(512, 1024, kernel_size=3, stride=1, padding=1)
         self.conv5 = layers.ConvCom(1024, self.channel, kernel_size=1, stride=1, padding=0, bn=False, act=False)
-        self.processor = layers.BoxProcessor(self.anchor, self.cls, 0.5)
 
-    def forward(self, out, concat, step='forward', first=True, inter=False, inter_recon=False):
+    def forward(self, out, step='forward', first=True, inter=False, inter_recon=False):
         if ('forward' in step):
             if (self.ind == 0) or (first == True):
                 if (self.ind==0) and (first == True):
@@ -50,13 +49,11 @@ class YoloPart(nn.Module):
             out = self.conv3(out)
             block1 = out
             out = self.conv4(out)
-            out = self.conv5(out)
             block2 = out
-            out = self.processor(out)
+            out = self.conv5(out)
         elif ('backward' in step):
-            out = self.processor(out, step='backward')
-            block2_recon = out
             out = self.conv5(out, step='backward')
+            block2_recon = out
             out = self.conv4(out, step='backward')
             block1_recon = out
             out = self.conv3(out, step='backward')

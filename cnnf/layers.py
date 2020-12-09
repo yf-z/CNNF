@@ -557,7 +557,7 @@ class BoxProcessor(nn.Module):
                         st = k * (5 + self.cls)
                         # coord-recon
                         x_org[n, st, cy, cx] = tx
-                        x_org[n, st+1, cy, cx] = tx+1
+                        x_org[n, st+1, cy, cx] = ty
                         # size-recon
                         x_org[n, st+2, cy, cx] = torch.log(xw / self.anchor[k][0])
                         x_org[n, st+3, cy, cx] = torch.log(xh / self.anchor[k][1])
