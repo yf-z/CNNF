@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import math
+import numpy as np
 
 class InsNorm(nn.Module):
     """
@@ -150,22 +151,17 @@ class LeakyReLU(nn.Module):
     def __init__(self, negative_slope=0.01):
         super().__init__()
         self.mask = None
-        self.hidden = None
         self.negative_slope = negative_slope
 
     def forward(self, x, unit_space=None, step='forward'):
         if 'forward' in step:
             # Store which weights were activated
-            if self.hidden is None:
-                self.mask = (x > 0).float() + (x < 0).float() * self.negative_slope
-            else:
-                self.mask = (x * self.hidden > 0).float() + (x * self.hidden() < 0).float() * self.negative_slope
+            self.mask = (x > 0).float() + (x < 0).float() * self.negative_slope
             result = x * self.mask
 
             return result
 
         elif 'backward' in step:
-            self.hidden = x
             recon_hidden = x / self.mask
             if unit_space is not None:
                 return recon_hidden, unit_space
@@ -176,7 +172,6 @@ class LeakyReLU(nn.Module):
             raise ValueError("step must be 'forward' or 'backward'")
 
     def reset(self):
-        self.hidden = None
         self.mask = None
 
 
@@ -419,6 +414,7 @@ class ConvCom(nn.Module):
 
 class Concat(nn.Module):
     def __init__(self, size):
+        super().__init__()
         self.cat = torch.empty(*size)
 
     def forward(self, x, step='forward', bias=None):
@@ -432,3 +428,140 @@ class Concat(nn.Module):
             return chunks[0]
         else:
             raise ValueError("step must be 'forward' or 'backward'")
+
+
+class AnchorProcessor(nn.Module):
+    def __init__(self, anchor=[[116,90], [156,198], [373,326]], cls=1):
+        super().__init__()
+        self.cls = cls
+        if any(anchor<=0):
+            raise ValueError("all anchors are expected to be positive! Input Anchor = {}".format(anchor))
+        self.anchor = anchor
+        self.sig = nn.Sigmoid()
+        self.vec_in = len(self.anchor)*(5+self.cls)
+        self.vec_o = len(self.anchor)*6
+
+    def forward(self, x, step='forward'):
+        if 'forward' in step:
+            N, C, H, W = [*x.shape]
+            if C != self.vec_in:
+                raise ValueError("expected channel {} != input channel {}".format(self.vec_in, C))
+            x_box = torch.zeros(N, self.vec_o, H, W)
+            for k in range(len(self.anchor)):
+                st_in = k * (5 + self.cls)
+                st_o = k * 6
+                # precompute
+                x_box[:, st_o:st_o+2, :, :] = self.sig(x[:, st_in:st_in+2, :, :])
+                x_box[:, st_o+2:st_o+4, :, :] = torch.exp(x[:, st_in+2:st_in+4, :, :])
+                # size
+                x_box[:, st_o + 2, :, :] = x[:, st_in + 2, :, :] * self.anchor[k, 0]
+                x_box[:, st_o + 3, :, :] = x[:, st_in + 3, :, :] * self.anchor[k, 1]
+                # compute for each
+                for cy in range(H):
+                    for cx in range(W):
+                        # coordinate
+                        x_box[:, st_o, cy, cx] += cx
+                        x_box[:, st_o+1, cy, cx] += cy
+                        # class
+                        en = (k + 1) * (5 + self.cls)
+                        score = x[:, st_in+5:en, cy, cx] * x[:, st_in+4, cy, cx]
+                        x_box[:, st_o+4, cy, cx] = torch.max(score)
+                        x_box[:, st_o+5, cy, cx] = torch.argmax(score)
+            return x_box
+        elif 'backward' in step:
+            N, C, H, W = [*x.shape]
+            if C != self.vec_o:
+                raise ValueError("expected channel {} != input channel {}".format(self.vec_o, C))
+            x_org = torch.zeros(N, self.vec_in, H, W)
+            for n in range(N):
+                for k in range(len(self.anchor)):
+                    st_in = k * (5 + self.cls)
+                    st_o = k * 6
+                    # compute for each window
+                    for cy in range(H):
+                        for cx in range(W):
+                            if all(x[n, st_o+2:st_o+4, cy, cx] > 0):
+                                # coordinate_recon
+                                x_org[n, st_in, cy, cx] = torch.logit(x[:, st_o, cy, cx] - cx)
+                                x_org[n, st_in+1, cy, cx] = torch.logit(x[:, st_o+1, cy, cx] - cy)
+                                # size_recon
+                                x_org[n, st_in + 2, cy, cx] = torch.log(x[:, st_o + 2, cy, cx] / self.anchor[k, 0])
+                                x_org[n, st_in + 3, cy, cx] = torch.log(x[:, st_o + 3, cy, cx] / self.anchor[k, 1])
+                                # class_recon
+                                x_org[n, st_in + 4, cy, cx] = 1.0
+                                cls = int(x[n, st_o + 5, cy, cx])
+                                if cls < 0 or cls >= self.cls:
+                                    raise ValueError("all class number expected to be integers between 0 to {}".format(self.cls-1))
+                                x_org[n, st_in + 5 + cls, cy, cx] = 1.0
+            return x_org
+
+
+class BoxProcessor(nn.Module):
+    def __init__(self, anchor=[[116,90], [156,198], [373,326]], cls=1, conf_thr=0.5):
+        super().__init__()
+        self.cls = cls
+        if any(anchor<=0):
+            raise ValueError("all anchors are expected to be positive! Input Anchor = {}".format(anchor))
+        self.anchor = anchor
+        self.sig = nn.Sigmoid()
+        self.vec_in = len(self.anchor)*(5+self.cls)
+        self.conf_thr = conf_thr
+
+    def forward(self, x, step='forward', grid_size=[13, 13]):
+        if 'forward' in step:
+            N, C, H, W = [*x.shape]
+            if C != self.vec_in:
+                raise ValueError("expected channel {} != input channel {}".format(self.vec_in, C))
+            x_list = []
+            for n in range(N):
+                box_list = []
+                for k in range(len(self.anchor)):
+                    st = k * (5 + self.cls)
+                    # precompute
+                    x[:, st:st+2, :, :] = self.sig(x[:, st:st+2, :, :])
+                    x[:, st+2:st+4, :, :] = torch.exp(x[:, st+2:st+4, :, :])
+                    # size
+                    x[:, st + 2, :, :] = x[:, st + 2, :, :] * self.anchor[k, 0]
+                    x[:, st + 3, :, :] = x[:, st + 3, :, :] * self.anchor[k, 1]
+                    # compute for each cell
+                    for cy in range(H):
+                        for cx in range(W):
+                            # score
+                            en = (k + 1) * (5 + self.cls)
+                            score = x[n, st + 5:en, cy, cx] * x[n, st + 4, cy, cx]
+                            if torch.max(score) > self.conf_thr:
+                                # coordinate
+                                x[n, st, cy, cx] += cx
+                                x[n, st+1, cy, cx] += cy
+                                # class decision
+                                x[n, st + 4, cy, cx] = torch.max(score)
+                                x[n, st + 5, cy, cx] = torch.argmax(score)
+                                box_list.append(x[n, st:st+6])
+                x_list.append(box_list)
+            return x_list
+        elif 'backward' in step:
+            N = len(x)
+            C = self.vec_in
+            H, W = grid_size
+            x_org = torch.zeros(N, C, H, W)
+            for n in range(N):
+                for box in x[n]:
+                    xx, xy, xw, xh, xconf, xcls = box
+                    cx = int(torch.floor(xx))
+                    cy = int(torch.floor(xy))
+                    if cx < 0 or cx >= W or cy < 0 or cy >= H:
+                        raise ValueError("processor: cx, cy out of bound")
+                    tx = torch.logit(xx - cx)
+                    ty = torch.logit(xy - cy)
+                    for k in range(len(self.anchor)):
+                        st = k * (5 + self.cls)
+                        # coord-recon
+                        x_org[n, st, cy, cx] = tx
+                        x_org[n, st+1, cy, cx] = tx+1
+                        # size-recon
+                        x_org[n, st+2, cy, cx] = torch.log(xw / self.anchor[k][0])
+                        x_org[n, st+3, cy, cx] = torch.log(xh / self.anchor[k][1])
+                        # conf-recon
+                        x_org[n, st+4, cy, cx] = xconf
+                        x_org[n, st+5+xcls, cy, cx] = 1.0
+            return x_org
