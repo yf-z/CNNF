@@ -23,6 +23,56 @@ from utils import *
 from advertorch.attacks import GradientSignAttack, LinfPGDAttack
 from advertorch.context import ctx_noparamgrad_and_eval
 
+
+class loss():
+    def __init__(self, scale, original_size, lambdas = (0.5, 0.5)):
+        #  lambda: lambda_coord, lambda_noobj defualt values are 0.5
+        self.lambda_coord, lambda_noobj = lambdas
+
+    def loss(self, ground_truth, output, xcls):
+        #  ground truth N*6*H*W: x, y, h, w, pc, label
+        #  output N*(len(anchor)*(5+xcls)*H*W)
+
+        stride = 5+xcls
+
+        # get I_obj and I_noobj
+        temp_output = output.transpose((0,2,3,1))
+        temp_output = temp_output.reshape((output.shape[0], output.shape[2], output.shape[3], -1, stride)) 
+        temp_truth = ground_truth.transpose((0,2,3,1))
+        temp_truth = temp_truth.reshape((output.shape[0], output.shape[2], output.shape[3], -1, 6)) 
+        # h*w*len(anchor)*(5+cls)
+
+        I = temp_output[:,:,:,4] >= 0.5
+
+        # calcuate box loss
+        boxes = temp_output[I][:4] # N*4
+        truth_boxes = temp_truth[I][:4] # N*4
+
+        box_loss = 0
+        box_loss += F.mse_loss(boxes, truth_boxes, reduction='sum') # N*1
+        box_loss = self.lambda_coord*np.sum(box_loss)
+
+        # calculate class loss
+        labels = temp_output[I][5:] # N*cls
+        truth_labels = temp_truth[I][5] #N*1
+        p_c = temp_output[I][4]
+
+        p_c = -1*np.log(p_c) # N*1
+        class_loss = F.cross_entropy(np.argmax(labels), truth_labels) # N*1
+        class_loss = p_c+class_loss # N*1
+        class_loss = np.sum(class_loss)
+
+        # calculate noobj loss
+        I_noobj = ~I
+        p_c_noobj = temp_output[I][4]
+        p_c_noobj = -1*np.log(-1*p_c_noobj+1)
+        noobj_loss = self.lambda_noobj*np.sum(p_c_noobj)
+
+        # total loss
+        loss = box_loss+class_loss+noobj_loss
+
+        return loss
+
 def train_adv(args, model, device, train_loader, optimizer, scheduler, epoch,
           cycles, mse_parameter=1.0, clean_parameter=1.0, clean='supclean'):
 
